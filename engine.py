@@ -8,9 +8,9 @@ import json
 import os
 import shutil
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
-DATA_NAMES = ("TITLE", "CONSENT", "DECLINED", "INTRO", "HELP", "NODES", "EVIDENCE", "LINKS", "RESTORES",
+DATA_NAMES = ("TITLE", "CONSENT", "DECLINED", "INTRO", "HELP", "NODES", "EVIDENCE", "LINKS", "NEAR", "RESTORES",
               "LOCKS", "PEOPLE", "TESTIMONY", "REPORT", "MESSAGES", "AFTER_REPORT", "ASKS", "CASE_END", "TICS")
 
 
@@ -199,6 +199,9 @@ class Game:
         pool = list(dict.fromkeys(self.visible_here() + st["read"]))
         k = self.resolve(q, self.ev_table(), pool)
         if not k:
+            r = self.resolve(q, RESTORES, st["restored"])
+            if r:
+                return "\n".join(["▣ %s（还原）" % RESTORES[r]["name"]] + ["　" + x for x in RESTORES[r]["text"].splitlines()])
             return Fail("没有这份证据，或者它不在这里。look 看看这里有什么，list 看看你手上有什么。")
         e = self.ev(k)
         new = k not in st["read"]
@@ -219,6 +222,7 @@ class Game:
         if st["restored"]:
             L.append("【还原出来的】")
             L += [" · %s" % RESTORES[r]["name"] for r in st["restored"]]
+            L.append("（read <名字> 可以重读）")
         return "\n".join(L)
 
     def pick(self, q):
@@ -250,6 +254,9 @@ class Game:
                     st["nodes"].append(ln["unlock_node"])
                     L.append("🗺 现在可以去：%s" % NODES[ln["unlock_node"]]["name"])
                 return "\n".join(L)
+        for nr in NEAR:
+            if {nr["a"], nr["b"]} == {a, b}:
+                return "\n".join(["◇ 有关系，但还不够下结论。"] + ["　" + x for x in nr["text"].splitlines()])
         return "你把两份放在一起看了很久。至少现在，看不出它们有什么关系。"
 
     def c_restore(self, arg):
@@ -264,7 +271,7 @@ class Game:
             need = set(r["frags"])
             if got == need:
                 if rid in st["restored"]:
-                    return "已经拼好了。list 里能看到。"
+                    return "\n".join(["▣ %s（已经拼好了）" % r["name"]] + ["　" + x for x in r["text"].splitlines()])
                 st["restored"].append(rid)
                 st["dark"]["absorb"] += 2
                 self.flag(rid)
@@ -340,12 +347,23 @@ class Game:
             L = [REPORT["header"]]
             for f in fields:
                 L.append("　%s：%s　（可填：%s）" % (f["name"], st["report"].get(f["id"], "——"), " / ".join(self.opts_for(f))))
+            if st.get("report_reason"):
+                L.append("　理由：%s" % st["report_reason"])
             L.append("（report <栏目> <值> 填写；report submit 提交）" if not st["submitted"] else REPORT["submitted"])
+            if not st["submitted"]:
+                L.append(REPORT["reason"])
             return "\n".join(L)
         if st["submitted"]:
             return Fail("报告已经提交了。")
         if arg[0] in ("submit", "提交"):
             return self.submit(fields)
+        if arg[0] in ("理由", "reason", "说明"):
+            text = " ".join(arg[1:]).strip()
+            if not text:
+                return Fail("report 理由 <一句话>")
+            st["report_reason"] = text[:200]
+            self.note_text(" " + text + " ")
+            return "理由：%s" % text[:200]
         f = next((f for f in fields if arg[0] in f["name"] or arg[0] == f["id"]), None)
         if not f:
             return Fail("没有这一栏。report 看看有哪些。")
@@ -371,7 +389,7 @@ class Game:
         L = [REPORT["submitted"]]
         if len(fields) == len(REPORT["fields"]) and all(v and v != "未知" for v in vals):
             L.append(REPORT["complete"])
-        L += ["", AFTER_REPORT["killer"]]
+        L += ["", AFTER_REPORT["killer"], AFTER_REPORT["by_status"][st["report"]["status"]]]
         d = st["dark"]
         if d["absorb"] >= 3 and d["absorb"] >= d["human"]:
             L.append(AFTER_REPORT["killer_absorb"])
@@ -483,6 +501,11 @@ class Game:
 _G = None
 
 
+def verb_of(c):
+    parts = c.strip().split()
+    return ALIAS.get(parts[0], parts[0].lower()) if parts else ""
+
+
 def _load():
     global _G
     if _G is not None:
@@ -526,21 +549,29 @@ def cmd(text):
             return new_game(force=True)
         g.say("要重新开始吗？确认请输入：new; confirm（旧存档会备份成 %s.bak）" % save_path())
         return "\n".join(g.out)
-    cmds = [x for x in allc if x.strip()][:MAX_BATCH]
+    allcmds = [x for x in allc if x.strip()]
+    cmds = allcmds[:MAX_BATCH]
     for i, c in enumerate(cmds):
         g.st["turn"] += 1
         if len(cmds) > 1:
             g.say("▶ " + c.strip())
+        verb = verb_of(c)
         res = g.run(c)
         if res:
             g.say(res)
-        g.check_messages()
+        if verb in ("read", "compare", "restore", "open", "ask", "goto") and not isinstance(res, Fail):
+            g.check_messages()
+        if verb == "quit" and i < len(cmds) - 1:
+            g.say("（你离开了，后面的指令没有执行。）")
+            break
         if isinstance(res, Fail) and i < len(cmds) - 1:
             g.say("（后面的指令先停下了。）")
             break
-        if g.st["pending"] and i < len(cmds) - 1 and not c.strip().startswith(("choose", "help", "status")):
+        if g.st["pending"] and i < len(cmds) - 1 and verb not in ("choose", "help", "status"):
             g.say("（有事要你决定，后面的指令先停下了。）")
             break
+    if len(allcmds) > MAX_BATCH:
+        g.say("（一次最多 %d 条。后面 %d 条没有执行。）" % (MAX_BATCH, len(allcmds) - MAX_BATCH))
     g.save()
     if not g.st.get("nobar") and os.environ.get("PIER7_BAR", "1") != "0":
         g.say(g.bar())

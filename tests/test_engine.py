@@ -76,7 +76,9 @@ def messages_come_one_at_a_time():
     E.cmd("goto 码头; read 日志; goto 镜像; read 路由; read 通话")
     out = E.cmd("compare 日志 路由")
     assert "你在找 N-17" in out and "它没有死" not in out, out
-    out = E.cmd("look")
+    out = E.cmd("look; help; status")
+    assert "它没有死" not in out, out
+    out = E.cmd("read 残片A")
     assert "它没有死" in out, out
 
 
@@ -107,6 +109,49 @@ def everything_has_a_way_in():
     fresh()
     E.cmd("goto 码头; read 日志; goto 镜像; read 路由; compare 日志 路由; goto 阿沅; ask 阿沅 那天晚上; compare 路由 证词")
     assert "c1_lead" in S()["flags"] and S()["dark"]["absorb"] == 0
+
+
+@test
+def six_characters_means_six():
+    fresh()
+    E.cmd("goto 镜像; read 残片A")
+    out = E.cmd("read 残片A")
+    assert "你今天累了吗" in out
+    assert len("你今天累了吗") == 6
+
+
+@test
+def reasonable_pairs_get_a_real_answer():
+    fresh()
+    E.cmd("goto 码头; read 日志; read checkpoint")
+    out = E.cmd("compare 日志 checkpoint")
+    assert "还不够下结论" in out and "同一分钟" in out, out
+
+
+@test
+def restored_text_can_be_reread():
+    fresh()
+    E.cmd("goto 码头; read 日志; goto 镜像; read 路由; read 残片A; open 缓存 明天见; read 残片C; compare 日志 路由")
+    E.cmd("goto R-3; read 残片B; restore a b c")
+    out = E.cmd("read 03:14")
+    assert "说得和你一模一样" in out, out
+
+
+@test
+def batch_rules():
+    fresh()
+    out = E.cmd(";".join(["status"] * 10))
+    assert "后面 2 条没有执行" in out, out
+    out = E.cmd("quit; goto 码头")
+    assert "后面的指令没有执行" in out and S()["loc"] == "office", out
+
+
+@test
+def status_reply_and_reason():
+    fresh()
+    E.cmd("report 状态 未知; report 理由 记忆和口吻还在，不能证明它还在～")
+    out = E.cmd("report submit")
+    assert "你是第一个这样写的" in out and S()["dark"]["drift"] == 1, out
 
 
 @test
