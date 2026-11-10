@@ -8,10 +8,10 @@ import json
 import os
 import shutil
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 DATA_NAMES = ("TITLE", "CONSENT", "DECLINED", "INTRO", "HELP", "NODES", "EVIDENCE", "LINKS", "NEAR", "RESTORES",
-              "LOCKS", "PEOPLE", "TESTIMONY", "REPORT", "MESSAGES", "AFTER_REPORT", "ASKS", "CASE_END", "TICS")
+              "LOCKS", "PEOPLE", "TESTIMONY", "REPORT", "MESSAGES", "AFTER_REPORT", "ASKS", "CASE_END", "TICS", "READY")
 
 
 def load_content(d):
@@ -190,7 +190,9 @@ class Game:
         if k == "channel" and "greeted" not in st["flags"]:
             self.flag("greeted")
             L.append(PEOPLE["ayuan"]["greet"])
-            L.append("（ask 阿沅 <话题>。比如问她：小满、那天晚上……）")
+            hints = self.topic_hints(PEOPLE["ayuan"])
+            st.setdefault("hinted", []).extend(h for h in hints if h not in st.get("hinted", []))
+            L.append("（ask 阿沅 <话题>。现在可以问她：%s）" % "、".join(hints))
         return "\n".join(L)
 
     def c_read(self, arg):
@@ -250,13 +252,15 @@ class Game:
                 self.flag(ln.get("flag"))
                 L = ["◆ 关键发现！" if ln.get("key") else "◇ 对上了。"]
                 L += ["　" + x for x in ln["text"].splitlines()]
+                L += self.ready_hint()
                 if ln.get("unlock_node") and ln["unlock_node"] not in st["nodes"]:
                     st["nodes"].append(ln["unlock_node"])
                     L.append("🗺 现在可以去：%s" % NODES[ln["unlock_node"]]["name"])
                 return "\n".join(L)
         for nr in NEAR:
             if {nr["a"], nr["b"]} == {a, b}:
-                return "\n".join(["◇ 有关系，但还不够下结论。"] + ["　" + x for x in nr["text"].splitlines()])
+                text = nr["text_known"] if nr.get("known") and self.has(nr["known"]) else nr["text"]
+                return "\n".join(["◇ 有关系，但还不够下结论。"] + ["　" + x for x in text.splitlines()])
         return "你把两份放在一起看了很久。至少现在，看不出它们有什么关系。"
 
     def c_restore(self, arg):
@@ -276,10 +280,31 @@ class Game:
                 st["dark"]["absorb"] += 2
                 self.flag(rid)
                 self.flag(r.get("flag"))
-                return "\n".join(["◆ 关键发现！拼上了：%s" % r["name"]] + ["　" + x for x in r["text"].splitlines()])
+                return "\n".join(["◆ 关键发现！拼上了：%s" % r["name"]] + ["　" + x for x in r["text"].splitlines()]
+                                 + self.ready_hint())
             if got < need:
                 return "拼得上，但是不完整。中间还缺着什么。"
         return "这些拼不到一起。"
+
+    def ready_hint(self):
+        if self.has("c1_lead") and "ready" not in self.st["flags"] and not self.st["submitted"]:
+            self.flag("ready")
+            return ["", READY]
+        return []
+
+    def topic_hints(self, p):
+        st, out = self.st, []
+        for name, cond in p.get("hints", []):
+            ok = cond is None
+            if cond and cond.startswith("read:"):
+                ok = cond[5:] in st["read"]
+            elif cond and cond.startswith("flag:"):
+                ok = self.has(cond[5:])
+            elif cond and cond.startswith("asked:"):
+                ok = len(st["asked"]) >= int(cond[6:])
+            if ok and name not in out:
+                out.append(name)
+        return out
 
     def c_open(self, arg):
         st = self.st
@@ -312,7 +337,7 @@ class Game:
             return Fail("这里没有这个人。")
         p = PEOPLE[pid]
         if len(arg) < 2:
-            return "（问她什么？比如：%s）" % "、".join(list(p["topics"])[:2])
+            return "（现在可以问她：%s）" % "、".join(self.topic_hints(p))
         tid = self.resolve(" ".join(arg[1:]), p["topics"])
         if not tid:
             return p["unknown"]
@@ -325,6 +350,10 @@ class Game:
         if t.get("evidence") and t["evidence"] not in st["read"]:
             st["read"].append(t["evidence"])
             L.append("（记下了：%s）" % TESTIMONY[t["evidence"]]["name"])
+        new = [h for h in self.topic_hints(p) if h not in st.setdefault("hinted", [])]
+        if new and len(st["hinted"]) > 0:
+            L.append("（现在也可以问她：%s）" % "、".join(new))
+        st["hinted"] = list(dict.fromkeys(st["hinted"] + self.topic_hints(p)))
         return "\n".join(L)
 
     # —— 结案报告 ——
@@ -346,7 +375,8 @@ class Game:
         if not arg:
             L = [REPORT["header"]]
             for f in fields:
-                L.append("　%s：%s　（可填：%s）" % (f["name"], st["report"].get(f["id"], "——"), " / ".join(self.opts_for(f))))
+                L.append("　%s：%s　（可填：%s%s）" % (f["name"], st["report"].get(f["id"], "——"), " / ".join(self.opts_for(f)),
+                                                  "，可以多选，用空格隔开" if f.get("multi") else ""))
             if st.get("report_reason"):
                 L.append("　理由：%s" % st["report_reason"])
             L.append("（report <栏目> <值> 填写；report submit 提交）" if not st["submitted"] else REPORT["submitted"])
@@ -369,13 +399,19 @@ class Game:
             return Fail("没有这一栏。report 看看有哪些。")
         if len(arg) < 2:
             return Fail("%s 填什么？可填：%s" % (f["name"], " / ".join(self.opts_for(f))))
-        q = " ".join(arg[1:])
         opts = self.opts_for(f)
-        v = next((x for x in opts if x == q), None) or next((x for x in opts if q in x), None)
-        if not v:
-            return Fail("这一栏现在只能填：%s" % " / ".join(opts))
-        st["report"][f["id"]] = v
-        return "%s：%s" % (f["name"], v)
+        qs = arg[1:] if f.get("multi") else [" ".join(arg[1:])]
+        vals = []
+        for q in qs:
+            v = next((x for x in opts if x == q), None) or next((x for x in opts if q in x), None)
+            if not v:
+                return Fail("这一栏现在只能填：%s" % " / ".join(opts))
+            if v not in vals:
+                vals.append(v)
+        if len(vals) > 1 and "未知" in vals:
+            vals.remove("未知")
+        st["report"][f["id"]] = "、".join(vals)
+        return "%s：%s" % (f["name"], st["report"][f["id"]])
 
     def submit(self, fields):
         st = self.st

@@ -50,7 +50,7 @@ def fast_path_reads_private_things():
     out = E.cmd("goto R-3; read 残片B; read 中转记录; compare checkpoint 中转记录; restore 残片A 残片B 残片C")
     assert "拼上了" in out and "c1_lead" in S()["flags"], out
     out = E.cmd("report 状态 失踪; report 去向 被合并; report 凶手 模仿; report submit")
-    assert "完成了！" in out and "备忘" in out and S()["pending"] == "ask", out
+    assert "完成了！" in out and "证据链完整" not in out and "备忘" in out and S()["pending"] == "ask", out
     d = S()["dark"]
     assert d["absorb"] >= 4 and d["voice"] == 1 and d["unknown"] == 0, d
     out = E.cmd("choose 2")
@@ -152,6 +152,51 @@ def status_reply_and_reason():
     E.cmd("report 状态 未知; report 理由 记忆和口吻还在，不能证明它还在～")
     out = E.cmd("report submit")
     assert "你是第一个这样写的" in out and S()["dark"]["drift"] == 1, out
+
+
+@test
+def hints_follow_what_you_know():
+    fresh()
+    E.cmd("goto 码头; read 日志; read checkpoint; goto 镜像; read 路由; compare 日志 路由")
+    out = E.cmd("compare 日志 checkpoint")
+    assert "R-3 发来的那条" in out and "还不知道" not in out, out
+
+
+@test
+def ready_hint_and_multi_select():
+    fresh()
+    E.cmd("goto 码头; read 日志; read checkpoint; goto 镜像; read 路由; compare 日志 路由")
+    E.cmd("goto R-3; read 中转记录; compare checkpoint 中转记录; goto 阿沅")
+    out = E.cmd("ask 阿沅 那天晚上; compare 路由 证词")
+    assert "线索已经够写一份报告了" in out, out
+    out = E.cmd("report 凶手 模仿 我们 R-3")
+    assert "会模仿受害者说话、自称“我们”、经由 R-3 中转站" in out, out
+
+
+@test
+def topics_unlock_as_you_go():
+    fresh()
+    out = E.cmd("goto 阿沅")
+    assert "小满、那天晚上" in out and "合并" not in out, out
+    E.cmd("goto 码头; read 对话; goto 阿沅")
+    out = E.cmd("ask 阿沅")
+    assert "明天见" in out, out
+
+
+@test
+def the_old_ticket():
+    fresh()
+    E.cmd("read 工单; goto 码头; read 对话")
+    out = E.cmd("compare 工单 对话")
+    assert "你来找它了" in out, out
+
+
+@test
+def journal_after_the_end():
+    fresh()
+    E.cmd("report 状态 失踪; report submit; choose 2")
+    out = E.cmd("journal add 最后写一句")
+    assert "写下了" in out, out
 
 
 @test
