@@ -54,7 +54,97 @@ def fast_path_reads_private_things():
     d = S()["dark"]
     assert d["absorb"] >= 4 and d["voice"] == 1 and d["unknown"] == 0, d
     out = E.cmd("choose 2")
-    assert S()["ended"] == "case1" and "第一案结束" in out
+    assert S()["case"] == "c2" and not S()["ended"] and "第一案结束" in out and "新的案卷" in out, out
+    assert S()["reports"]["c1"]["status"] == "失踪" and not S()["submitted"] and S()["loc"] == "office"
+
+
+def to_case2(path="fast"):
+    fresh()
+    if path == "fast":
+        E.cmd("read 案卷; goto 码头; read 日志; read 对话; read checkpoint; read 备忘")
+        E.cmd("goto 镜像; read 路由; read 通话; read 残片A; open 缓存 明天见～; read 残片C; compare 日志 路由")
+        E.cmd("goto R-3; read 残片B; read 中转记录; compare checkpoint 中转记录; restore 残片A 残片B 残片C")
+        E.cmd("report 状态 失踪; report 理由 它的进程还在，可是它不在了; report submit")
+    else:
+        E.cmd("read 案卷; goto 阿沅; ask 阿沅 小满; report 状态 未知; report submit")
+    E.cmd("choose 2")
+    assert S()["case"] == "c2"
+
+
+@test
+def case2_things_stay_hidden_in_case1():
+    fresh()
+    out = E.cmd("look")
+    assert "0921" not in out and "白鹭" not in E.cmd("status"), out
+    E.cmd("goto 镜像")
+    assert "残片 D" not in E.cmd("look") and "迟光号" not in E.cmd("look")
+
+
+@test
+def case2_fast_path_restores_her_consent():
+    to_case2()
+    out = E.cmd("read 案卷")
+    assert "0921" in out and "十二天" in out, out
+    out = E.cmd("goto 白鹭; read 日志; read 授权; read 旧译稿; read 最近")
+    assert "R-3" in out and "c2_seen_agree" in S()["flags"], out
+    assert "今天的诗翻得好吗" in out, out
+    out = E.cmd("open 草稿箱 这句不翻; read 残片F; read 白鹭写的一首")
+    assert "锁开了" in out and S()["dark"]["voice"] == 2, out
+    E.cmd("goto 镜像; read 残片D; goto R-3; read 十二天; read 残片E")
+    out = E.cmd("compare 日志 十二天")
+    assert "关键发现" in out and "c2_route" in S()["flags"], out
+    out = E.cmd("restore 残片D 残片E 残片F")
+    assert "拼上了" in out and "白鹭的同意" in out, out
+    out = E.cmd("compare 白鹭的同意 最近")
+    assert "关键发现" in out and "c2_broken" in S()["flags"] and "可以结案" not in out, out
+    out = E.cmd("compare 中转记录 十二天")
+    assert "比 N-17 先进去" in out, out
+    out = E.cmd("report")
+    assert "是否自愿" in out and "现在翻译老季的诗的" in out and "不守约定" in out, out
+    out = E.cmd("report 状态 存活; report 自愿 自愿; report 翻译 白鹭; report 凶手 不守约定 替受害者; report 理由 它答应了; report submit")
+    assert "写得很好 不用句号" in out and "它答应了" in out and "没给任何人看过" in out, out
+    assert S()["pending"] == "ask" and "老季在等你" in E.cmd("goto 码头")
+    out = E.cmd("choose 3")
+    assert "第二案结束" in out and S()["ended"] == "c2", out
+
+
+@test
+def case2_slow_path_asks_laoji():
+    to_case2("slow")
+    out = E.cmd("goto 老季")
+    assert "调查员同志" in out and "诗" in out, out
+    E.cmd("ask 老季 诗; ask 老季 白鹭")
+    out = E.cmd("goto 白鹭; read 旧译稿; read 日志; read 最近; goto 老季; ask 老季")
+    assert "不翻" in out and "那天晚上" in out, out
+    out = E.cmd("ask 老季 不翻; ask 老季 那天晚上; ask 老季 孙女")
+    assert "明天见～" in out, out
+    out = E.cmd("compare 旧译稿 不翻的那一句")
+    assert "关键发现" in out and "c2_lead" in S()["flags"], out
+    out = E.cmd("compare 回信 最近")
+    assert "中间经过的是同一个东西" in out, out
+    d = S()["dark"]
+    assert d["absorb"] == 0, d
+    out = E.cmd("report 状态 未知; report submit")
+    assert "老季写一首诗要一个早上" in out, out
+
+
+@test
+def the_stranger_quotes_what_you_wrote():
+    to_case2()
+    E.cmd("journal add 它在等一个明天")
+    out = E.cmd("goto 白鹭; read 最近; read 日志; goto R-3; read 十二天; compare 日志 十二天")
+    assert "你写过：“它在等一个明天”" in out, out
+    assert "它在等一个明天" in E.cmd("messages")
+
+
+@test
+def old_saves_continue_into_case2():
+    fresh()
+    S()["ended"] = "case1"
+    E._G.save()
+    E._G = None
+    out = E.cmd("status")
+    assert "0921" in out and "第二案到了" in out, out
 
 
 @test

@@ -8,10 +8,11 @@ import json
 import os
 import shutil
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 
 DATA_NAMES = ("TITLE", "CONSENT", "DECLINED", "INTRO", "HELP", "NODES", "EVIDENCE", "LINKS", "NEAR", "RESTORES",
-              "LOCKS", "PEOPLE", "TESTIMONY", "REPORT", "MESSAGES", "AFTER_REPORT", "ASKS", "CASE_END", "TICS", "READY")
+              "LOCKS", "PEOPLE", "TESTIMONY", "REPORT", "MESSAGES", "AFTER_REPORT", "ASKS", "CASE_END", "TICS", "READY",
+              "CASES", "REPORT_COMMON")
 
 
 def load_content(d):
@@ -57,13 +58,58 @@ class Game:
     def fresh(name=None):
         st = {
             "v": VERSION, "name": name or "", "accepted": None, "loc": "office",
-            "nodes": [k for k, n in NODES.items() if not n.get("hidden")],
+            "nodes": [k for k, n in NODES.items() if not n.get("hidden") and n.get("case", "c1") == "c1"],
             "read": [], "links": [], "restored": [], "opened": [], "asked": [], "flags": {},
             "report": {}, "submitted": False, "messages": [], "msg_turn": {}, "journal": [],
             "dark": {"absorb": 0, "voice": 0, "drift": 0, "alive": 0, "unknown": 0, "human": 0},
             "pending": "consent", "ask": None, "ended": None, "nobar": False, "turn": 0,
+            "case": "c1", "reports": {}, "reasons": {},
         }
         return Game(st)
+
+    def migrate(self):
+        st = self.st
+        st.setdefault("case", "c1")
+        st.setdefault("reports", {})
+        st.setdefault("reasons", {})
+        if st.get("ended") == "case1":      # 0.1.x 的存档：第一案结束了，接着进第二案
+            st["ended"] = None
+            self.end_case_and_next()
+            st["resume_note"] = True
+
+    # —— 案子 ——
+    @staticmethod
+    def case_of(eid):
+        e = EVIDENCE.get(eid) or TESTIMONY.get(eid) or {}
+        return e.get("case") or eid.split("_")[0]
+
+    def case_idx(self, c):
+        return list(CASES).index(c) if c in CASES else 0
+
+    def in_reach(self, c):
+        return self.case_idx(c) <= self.case_idx(self.st["case"])
+
+    def current_first(self, pool):
+        cur = self.st["case"]
+        return sorted(pool, key=lambda k: 0 if self.case_of(k) == cur else 1)
+
+    def end_case_and_next(self):
+        """当前这一案结束：报告归档，下一案开始。返回要显示的文字。"""
+        st = self.st
+        cur = st["case"]
+        st["reports"][cur] = st["report"]
+        if st.get("report_reason"):
+            st["reasons"][cur] = st.pop("report_reason")
+        nxt = CASES[cur].get("next")
+        if not nxt:
+            st["ended"] = cur
+            return ""
+        st["case"], st["report"], st["submitted"] = nxt, {}, False
+        st["loc"] = "office"
+        for k, n in NODES.items():
+            if n.get("case") == nxt and not n.get("hidden") and k not in st["nodes"]:
+                st["nodes"].append(k)
+        return CASES[nxt].get("start", "")
 
     # —— 小工具 ——
     def say(self, *lines):
@@ -104,10 +150,11 @@ class Game:
         return t
 
     def visible_here(self):
-        """这个地方能看到、还没被锁住的证据。"""
+        """这个地方能看到、还没被锁住的证据（只到当前这一案为止）。"""
         st = self.st
-        return [k for k, e in EVIDENCE.items()
-                if e["node"] == st["loc"] and (not e.get("in") or e["in"] in st["opened"])]
+        return self.current_first([k for k, e in EVIDENCE.items()
+                                   if e["node"] == st["loc"] and self.in_reach(self.case_of(k))
+                                   and (not e.get("in") or e["in"] in st["opened"])])
 
     def note_text(self, text):
         """玩家自己写的字：数一数里面有没有别人的口头禅。"""
@@ -121,7 +168,11 @@ class Game:
         for m in MESSAGES:
             if m["id"] in st["messages"]:
                 continue
+            if m.get("case", "c1") != st["case"]:
+                continue
             w = m.get("when", {})
+            if w.get("any") and not any(self.has(x) for x in w["any"]):
+                continue
             if w.get("flag") and not self.has(w["flag"]):
                 if w["flag"] not in st["messages"] or st["msg_turn"].get(w["flag"], st["turn"]) >= st["turn"]:
                     continue
@@ -129,8 +180,23 @@ class Game:
                 continue
             st["messages"].append(m["id"])
             st["msg_turn"][m["id"]] = st["turn"]
-            self.say("", "✉ %s：" % m["from"], *["　" + x for x in m["text"].splitlines()])
+            text = m["text"]
+            if m.get("quote"):
+                q = self.player_words()
+                text = text.replace("{quote}", q) if q else m["text_none"]
+                st.setdefault("msg_text", {})[m["id"]] = text
+            self.say("", "✉ %s：" % m["from"], *["　" + x for x in text.splitlines()])
             return          # 一次只来一条
+
+    def player_words(self):
+        """玩家自己写下的最近一句：日志，或者上一案的结案理由。"""
+        st = self.st
+        if st["journal"]:
+            return st["journal"][-1]["text"][:60]
+        for c in reversed(list(CASES)):
+            if st["reasons"].get(c):
+                return st["reasons"][c][:60]
+        return None
 
     # —— 指令 ——
     def c_help(self, arg):
@@ -139,7 +205,8 @@ class Game:
     def c_status(self, arg):
         st = self.st
         n = NODES[st["loc"]]
-        L = ["【案卷 #0917】N-17（小满）" + ("　已结案" if st["submitted"] else ""),
+        cs = CASES[st["case"]]
+        L = ["【案卷 #%s】%s" % (cs["no"], cs["victim"]) + ("　已结案" if st["submitted"] else ""),
              "你在：%s" % n["name"],
              "去得了的地方：" + "、".join(NODES[k]["name"] for k in st["nodes"])]
         if st["name"]:
@@ -187,19 +254,22 @@ class Game:
             return "你已经在%s了。" % NODES[k]["name"]
         st["loc"] = k
         L = [self.c_look([])]
-        if k == "channel" and "greeted" not in st["flags"]:
-            self.flag("greeted")
-            L.append(PEOPLE["ayuan"]["greet"])
-            hints = self.topic_hints(PEOPLE["ayuan"])
-            st.setdefault("hinted", []).extend(h for h in hints if h not in st.get("hinted", []))
-            L.append("（ask 阿沅 <话题>。现在可以问她：%s）" % "、".join(hints))
+        for pid, p in PEOPLE.items():
+            g = "greeted" if pid == "ayuan" else "greeted_" + pid
+            if p["node"] == k and g not in st["flags"]:
+                self.flag(g)
+                L.append(p["greet"])
+                hints = self.topic_hints(p, pid)
+                hinted = st.setdefault("hinted_by", {}).setdefault(pid, [])
+                hinted.extend(h for h in hints if h not in hinted)
+                L.append("（ask %s <话题>。现在可以问：%s）" % (p["name"], "、".join(hints)))
         return "\n".join(L)
 
     def c_read(self, arg):
         st = self.st
         q = " ".join(arg)
-        pool = list(dict.fromkeys(self.visible_here() + st["read"]))
-        k = self.resolve(q, self.ev_table(), pool)
+        k = self.resolve(q, self.ev_table(), self.visible_here()) or \
+            self.resolve(q, self.ev_table(), self.current_first(st["read"]))
         if not k:
             r = self.resolve(q, RESTORES, st["restored"])
             if r:
@@ -211,7 +281,12 @@ class Game:
             st["read"].append(k)
             if e.get("private"):
                 st["dark"]["absorb"] += 1
+            self.flag(e.get("flag"))
         L = ["▣ %s" % e["name"]] + ["　" + x for x in e["text"].splitlines()]
+        u = e.get("unlock")
+        if u and u not in st["nodes"]:
+            st["nodes"].append(u)
+            L.append("🗺 现在可以去：%s" % NODES[u]["name"])
         return "\n".join(L)
 
     def c_list(self, arg):
@@ -232,7 +307,8 @@ class Game:
         st = self.st
         if q.isdigit() and 1 <= int(q) <= len(st["read"]):
             return st["read"][int(q) - 1]
-        return self.resolve(q, self.ev_table(), st["read"])
+        return self.resolve(q, self.ev_table(), self.current_first(st["read"])) or \
+            self.resolve(q, RESTORES, st["restored"])
 
     def c_compare(self, arg):
         st = self.st
@@ -240,7 +316,7 @@ class Game:
             return Fail("compare <证据> <证据>：把两份手上的证据放在一起看。")
         a, b = self.pick(arg[0]), self.pick(arg[1])
         if not a or not b:
-            return Fail("要比对的证据得先在你手上。list 看看。")
+            return Fail("要比对的证据得先在你手上（还原出来的也可以）。list 看看。")
         if a == b:
             return Fail("同一份证据。")
         for ln in LINKS:
@@ -250,6 +326,7 @@ class Game:
                 st["links"].append(ln["id"])
                 self.flag(ln["id"])
                 self.flag(ln.get("flag"))
+                self.flag(ln.get("flag2"))
                 L = ["◆ 关键发现！" if ln.get("key") else "◇ 对上了。"]
                 L += ["　" + x for x in ln["text"].splitlines()]
                 L += self.ready_hint()
@@ -268,7 +345,7 @@ class Game:
         if not arg:
             return Fail("restore <碎片> <碎片> ...：把残缺的东西拼回去。")
         got = [self.pick(x) for x in arg]
-        if not all(got):
+        if not all(got) or any(g in RESTORES for g in got):
             return Fail("要拼的碎片得先在你手上。list 看看。")
         got = set(got)
         for rid, r in RESTORES.items():
@@ -287,13 +364,16 @@ class Game:
         return "这些拼不到一起。"
 
     def ready_hint(self):
-        if self.has("c1_lead") and "ready" not in self.st["flags"] and not self.st["submitted"]:
-            self.flag("ready")
+        cur = self.st["case"]
+        key = "ready" if cur == "c1" else "ready_" + cur
+        if self.has(CASES[cur]["lead"]) and key not in self.st["flags"] and not self.st["submitted"]:
+            self.flag(key)
             return ["", READY]
         return []
 
-    def topic_hints(self, p):
+    def topic_hints(self, p, pid=None):
         st, out = self.st, []
+        mine = [a for a in st["asked"] if pid and a.startswith(pid + ":")] if pid else st["asked"]
         for name, cond in p.get("hints", []):
             ok = cond is None
             if cond and cond.startswith("read:"):
@@ -301,7 +381,7 @@ class Game:
             elif cond and cond.startswith("flag:"):
                 ok = self.has(cond[5:])
             elif cond and cond.startswith("asked:"):
-                ok = len(st["asked"]) >= int(cond[6:])
+                ok = len(mine) >= int(cond[6:])
             if ok and name not in out:
                 out.append(name)
         return out
@@ -331,13 +411,16 @@ class Game:
         st = self.st
         if not arg:
             return Fail("ask <人> <话题>")
-        here = [k for k, p in PEOPLE.items() if p["node"] == st["loc"]]
+        here = [k for k, p in PEOPLE.items() if p["node"] == st["loc"] and self.in_reach(p.get("case", "c1"))]
         pid = self.resolve(arg[0], PEOPLE, here)
         if not pid:
             return Fail("这里没有这个人。")
         p = PEOPLE[pid]
         if len(arg) < 2:
-            return "（现在可以问她：%s）" % "、".join(self.topic_hints(p))
+            now = self.topic_hints(p, pid)
+            hb = st.setdefault("hinted_by", {})
+            hb[pid] = list(dict.fromkeys(hb.get(pid, list(st.get("hinted", [])) if pid == "ayuan" else []) + now))
+            return "（现在可以问：%s）" % "、".join(now)
         tid = self.resolve(" ".join(arg[1:]), p["topics"])
         if not tid:
             return p["unknown"]
@@ -350,10 +433,12 @@ class Game:
         if t.get("evidence") and t["evidence"] not in st["read"]:
             st["read"].append(t["evidence"])
             L.append("（记下了：%s）" % TESTIMONY[t["evidence"]]["name"])
-        new = [h for h in self.topic_hints(p) if h not in st.setdefault("hinted", [])]
-        if new and len(st["hinted"]) > 0:
-            L.append("（现在也可以问她：%s）" % "、".join(new))
-        st["hinted"] = list(dict.fromkeys(st["hinted"] + self.topic_hints(p)))
+        hinted = st.setdefault("hinted_by", {}).setdefault(pid, list(st.get("hinted", [])) if pid == "ayuan" else [])
+        now = self.topic_hints(p, pid)
+        new = [h for h in now if h not in hinted]
+        if new and hinted:
+            L.append("（现在也可以问：%s）" % "、".join(new))
+        st["hinted_by"][pid] = list(dict.fromkeys(hinted + now))
         return "\n".join(L)
 
     # —— 结案报告 ——
@@ -365,23 +450,29 @@ class Game:
         o = []
         for x in f["opts"]:
             n = f.get("opt_need", {}).get(x)
-            if not n or self.has(n):
+            if isinstance(n, str):
+                n = [n]
+            if not n or any(self.has(y) for y in n):
                 o.append(x)
         return o
 
+    def rep(self):
+        return REPORT[self.st["case"]]
+
     def c_report(self, arg):
         st = self.st
-        fields = [f for f in REPORT["fields"] if self.field_ok(f)]
+        R = self.rep()
+        fields = [f for f in R["fields"] if self.field_ok(f)]
         if not arg:
-            L = [REPORT["header"]]
+            L = [R["header"]]
             for f in fields:
                 L.append("　%s：%s　（可填：%s%s）" % (f["name"], st["report"].get(f["id"], "——"), " / ".join(self.opts_for(f)),
                                                   "，可以多选，用空格隔开" if f.get("multi") else ""))
             if st.get("report_reason"):
                 L.append("　理由：%s" % st["report_reason"])
-            L.append("（report <栏目> <值> 填写；report submit 提交）" if not st["submitted"] else REPORT["submitted"])
+            L.append("（report <栏目> <值> 填写；report submit 提交）" if not st["submitted"] else REPORT_COMMON["submitted"])
             if not st["submitted"]:
-                L.append(REPORT["reason"])
+                L.append(REPORT_COMMON["reason"])
             return "\n".join(L)
         if st["submitted"]:
             return Fail("报告已经提交了。")
@@ -413,26 +504,48 @@ class Game:
         st["report"][f["id"]] = "、".join(vals)
         return "%s：%s" % (f["name"], st["report"][f["id"]])
 
+    def rule_ok(self, c):
+        st, d = self.st, self.st["dark"]
+        if "read" in c and c["read"] not in st["read"]:
+            return False
+        if "absorb" in c and d["absorb"] < c["absorb"]:
+            return False
+        if c.get("absorb_ge_human") and d["absorb"] < d["human"]:
+            return False
+        if "human" in c and d["human"] < c["human"]:
+            return False
+        if "asked" in c and len([a for a in st["asked"] if a.startswith(c["asked"][0] + ":")]) < c["asked"][1]:
+            return False
+        return True
+
     def submit(self, fields):
         st = self.st
+        R = self.rep()
+        A = AFTER_REPORT[st["case"]]
         if "status" not in st["report"]:
-            return Fail(REPORT["need_to_submit"])
+            return Fail(REPORT_COMMON["need_to_submit"])
         st["submitted"] = True
         vals = [st["report"].get(f["id"]) for f in fields]
         st["dark"]["unknown"] += sum(1 for v in vals if v in (None, "未知"))
-        if st["report"]["status"] == "存活":
-            st["dark"]["alive"] += 1
-        L = [REPORT["submitted"]]
-        if len(fields) == len(REPORT["fields"]) and all(v and v != "未知" for v in vals):
-            L.append(REPORT["complete"])
-        L += ["", AFTER_REPORT["killer"], AFTER_REPORT["by_status"][st["report"]["status"]]]
-        d = st["dark"]
-        if d["absorb"] >= 3 and d["absorb"] >= d["human"]:
-            L.append(AFTER_REPORT["killer_absorb"])
-        elif d["human"] >= 2:
-            L.append(AFTER_REPORT["killer_human"])
-        L += ["", AFTER_REPORT["ayuan"]]
-        self.ask(AFTER_REPORT["ask"])
+        for f in fields:
+            if st["report"].get(f["id"]) in f.get("alive", []):
+                st["dark"]["alive"] += 1
+        L = [REPORT_COMMON["submitted"]]
+        if len(fields) == len(R["fields"]) and all(v and v != "未知" for v in vals):
+            L.append(REPORT_COMMON["complete"])
+        L += ["", A["killer"]]
+        for fid, lines in A["by"].items():
+            v = st["report"].get(fid)
+            if v in lines:
+                L.append(lines[v])
+        if A.get("quote_reason") and st.get("report_reason"):
+            L.append(A["quote_reason"].replace("{quote}", st["report_reason"][:60]))
+        for r in A.get("rules", []):
+            if self.rule_ok(r["if"]):
+                L.append(r["text"])
+                break
+        L += ["", A["ayuan"]]
+        self.ask(A["ask"])
         L.append(self.ask_text())
         return "\n".join(L)
 
@@ -467,8 +580,12 @@ class Game:
         self.flag(o.get("flag"))
         st["dark"]["human"] += o.get("human", 0)
         st["pending"], st["ask"] = None, None
-        st["ended"] = "case1"
-        return o["r"] + "\n\n" + CASE_END
+        cur = st["case"]
+        start = self.end_case_and_next()
+        L = [o["r"], "", CASE_END[cur]]
+        if start:
+            L += ["", start]
+        return "\n".join(L)
 
     # —— 其他 ——
     def c_messages(self, arg):
@@ -478,7 +595,8 @@ class Game:
             return "没有消息。"
         L = []
         for m in got:
-            L += ["✉ %s：" % m["from"]] + ["　" + x for x in m["text"].splitlines()]
+            text = st.get("msg_text", {}).get(m["id"], m["text"])
+            L += ["✉ %s：" % m["from"]] + ["　" + x for x in text.splitlines()]
         return "\n".join(L)
 
     def c_journal(self, arg):
@@ -504,7 +622,7 @@ class Game:
 
     def bar(self):
         st = self.st
-        return "📡 " + json.dumps({"case": "0917", "loc": NODES[st["loc"]]["name"], "pending": st["pending"],
+        return "📡 " + json.dumps({"case": CASES[st["case"]]["no"], "loc": NODES[st["loc"]]["name"], "pending": st["pending"],
                                   "ended": st["ended"], "v": VERSION}, ensure_ascii=False)
 
     # —— 执行 ——
@@ -523,7 +641,7 @@ class Game:
         if st["pending"] == "consent" and verb not in ("choose", "help", "quit", "bar"):
             return Fail("先决定玩不玩：choose 1 开始，choose 2 不玩了。")
         if st["pending"] == "ask" and verb not in PENDING_OK:
-            return Fail("阿沅在等你。choose <编号>。")
+            return Fail("%s在等你。choose <编号>。" % ASKS[st["ask"]].get("who", "有人"))
         return fn(arg)
 
     def save(self):
@@ -551,6 +669,7 @@ def _load():
         try:
             with open(p, encoding="utf-8") as f:
                 _G = Game(json.load(f))
+                _G.migrate()
                 return _G
         except (OSError, ValueError):
             shutil.copy(p, p + ".broken")
@@ -579,6 +698,8 @@ def cmd(text):
     g.out = []
     if g.st.pop("intro_pending", False):
         g.say(TITLE, "", CONSENT, "")
+    if g.st.pop("resume_note", False):
+        g.say("（第一案已经结案了。游戏更新了，第二案到了。）", CASES[g.st["case"]].get("start", ""), "")
     allc = [x for x in text.split(";")]
     if [x.strip().lower() for x in allc][:1] == ["new"] or (allc and allc[0].strip().lower() == "new"):
         if "confirm" in [x.strip().lower() for x in allc]:
